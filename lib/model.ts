@@ -1,14 +1,16 @@
 // Token Radar, model radar-2: one sealed snapshot in, one ranked board out.
 //
 // The board ranks every protocol that records no token and could still launch one: the whole
-// watchlist (the floor, never the ceiling) plus every rankable pre-token protocol below the floor.
-// A protocol is rankable when it records no token (no market cap, no CoinGecko id, no symbol) and
-// is not a wrapped, staked or bridged product of a token that already trades: not a CEX, not a
-// versioned pool (a name ending in V2, v2, 2.0 or the like), not a Bridge / Canonical Bridge /
-// Liquid Staking / Liquid Restaking / Restaked BTC product, its name carrying no whole word
-// wrapped, staked or staking, and not beginning with an exchange's name. That is the house's own
-// watchlist rule, minus the TVL floor, applied to the whole snapshot. Live-token protocols are
-// kept apart and shown with the market's own values, never mixed into the ranking.
+// watchlist plus every rankable pre-token protocol in the snapshot, at any TVL. The watchlist is
+// the floor, never the ceiling: a protocol above the floor that the watchlist does not name is
+// still rankable, and cutting the board at the floor would silently drop it. A protocol is
+// rankable when it records no token (no market cap, no CoinGecko id, no symbol) and is not a
+// wrapped, staked or bridged product of a token that already trades: not a CEX, not a versioned
+// pool (a name ending in V2, v2, 2.0 or the like), not a Bridge / Canonical Bridge / Liquid
+// Staking / Liquid Restaking / Restaked BTC product, its name carrying no whole word wrapped,
+// staked or staking, and not beginning with an exchange's name. That is the house's own watchlist
+// rule, minus the TVL floor, applied to the whole snapshot. Live-token protocols are kept apart
+// and shown with the market's own values, never mixed into the ranking.
 //
 // Implied value follows only from the snapshot's own figures, never from a name:
 //
@@ -276,12 +278,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  // The early radar: every rankable pre-token protocol below the watchlist floor. No cut by TVL,
-  // no hand-picked list: if it could launch a token, it is on the board.
+  // The early radar: every rankable pre-token protocol the watchlist does not name, at any TVL.
+  // The floor is the watchlist's own cut, not the board's: a rankable protocol above the floor
+  // that the watchlist missed is still a protocol that could launch a token, so no cut by TVL
+  // and no hand-picked list — if it could launch a token, it is on the board.
   for (const p of snapshot.protocols) {
     if (chosen.has(p.slug)) continue;
     if (!isRankable(p)) continue;
-    if (p.tvl_usd >= snapshot.floor_usd) continue;
     chosen.set(p.slug, p);
   }
 
@@ -386,11 +389,139 @@ function secondActionFor(p: SnapshotProtocol, chain: string): string {
   return `Vote in ${p.name}'s governance or community poll when one is open, or use a second feature of its app.`;
 }
 
+/** The second chain a protocol names, or null when it runs on one chain only. */
+function secondChainOf(p: SnapshotProtocol): string | null {
+  return p.chains.length > 1 ? p.chains[1]! : null;
+}
+
 /**
- * A protocol's farm plan: eight steps, each an action with a cost and a time. The plan is derived
- * from the protocol's own record (category, chains, TVL, age), never from a hand-written list of
- * names. Every step carries what it costs and how long it takes, because a plan without either is
- * a slogan.
+ * The chain step: a protocol live on more than one chain earns its farm on a second chain too,
+ * so the wallet's activity is not confined to one network; a single-chain protocol gets a deeper
+ * position on the chain it runs on instead.
+ */
+function chainStepFor(p: SnapshotProtocol, capital: number, chain: string): FarmStep {
+  const second = secondChainOf(p);
+  if (second !== null) {
+    const half = Math.max(10, Math.round(capital / 2));
+    return {
+      text: `Repeat the same position with $${half} on ${second} through ${p.name}, so the wallet shows activity on two of its ${p.chains.length} chains instead of one.`,
+      cost: `$${half} of capital and about $3 of gas`,
+      time: '15 minutes, on a different day',
+    };
+  }
+  return {
+    text: `Deepen the position on ${chain} with a second feature of ${p.name}, such as its other pool or vault, so the wallet shows more than one transaction type.`,
+    cost: 'about $2 of gas',
+    time: '10 minutes, on a different day',
+  };
+}
+
+/**
+ * The timing step: the snapshot's own seven-day growth says whether to move now or wait. A
+ * protocol whose TVL is climbing fast is being farmed already, so the position goes in before the
+ * next snapshot; a shrinking one gets a check first, not more capital; an unknown one gets the
+ * smallest position until the points page proves the activity counts.
+ */
+function timingStepFor(p: SnapshotProtocol): FarmStep {
+  const g = p.change_7d;
+  if (g !== null && g >= 20) {
+    return {
+      text: `${p.name} grew ${g.toFixed(1)}% in seven days, so set the position up this week: fast growth is when a farm fills up, and the next snapshot counts it.`,
+      cost: 'no extra fee beyond the position',
+      time: 'this week',
+    };
+  }
+  if (g !== null && g <= -20) {
+    return {
+      text: `${p.name} shrank ${Math.abs(g).toFixed(1)}% in seven days, so confirm its app and pools are still live before adding capital, and start with the smallest position.`,
+      cost: 'no fee to check',
+      time: '10 minutes before funding',
+    };
+  }
+  if (g === null) {
+    return {
+      text: `The snapshot records no seven-day growth for ${p.name}, so treat the timing as unknown: fund the smallest position first and add more only after the points page shows the activity.`,
+      cost: 'no fee to check',
+      time: '10 minutes before funding',
+    };
+  }
+  return {
+    text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote on ${p.name}.`,
+    cost: 'about $2 of gas a week',
+    time: '10 minutes a week',
+  };
+}
+
+/**
+ * The risk step: the caution that fits the protocol's own category, because a lending position
+ * fails differently from a bridge transfer and a perpetuals hedge fails differently again.
+ */
+function riskStepFor(p: SnapshotProtocol, capital: number, chain: string): FarmStep {
+  const c = (p.category ?? '').toLowerCase();
+  const name = p.name;
+  if (c.includes('perpetual') || c.includes('derivative') || c.includes('basis trading')) {
+    return {
+      text: `Keep the hedge on ${name} small: a leveraged position can be liquidated, so never post more than the $${capital} margin and check the liquidation price weekly.`,
+      cost: 'no fee to check',
+      time: '5 minutes a week',
+    };
+  }
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) {
+    return {
+      text: `Watch the health factor of the ${name} loan on ${chain}: if the collateral falls, top it up or repay before the position is liquidated.`,
+      cost: 'no fee to check',
+      time: '5 minutes a week',
+    };
+  }
+  if (c.includes('bridge') || c.includes('canonical')) {
+    return {
+      text: `After bridging through ${name}, confirm the funds arrived on ${chain} before using them: a stuck bridge is checked on its own explorer, not by sending more.`,
+      cost: 'no fee to check',
+      time: '10 minutes',
+    };
+  }
+  if (c.includes('yield') || c.includes('leveraged farm')) {
+    return {
+      text: `Check what the ${name} vault actually holds on ${chain}: a high yield that comes from a token that is falling is a loss dressed as income.`,
+      cost: 'no fee to check',
+      time: '10 minutes a week',
+    };
+  }
+  if (c.includes('dex')) {
+    return {
+      text: `Watch impermanent loss in the ${name} pool on ${chain}: if one side of the pair moves far, the position is worth less than holding the two assets.`,
+      cost: 'no fee to check',
+      time: '5 minutes a week',
+    };
+  }
+  if (c.includes('staking') || c.includes('restak')) {
+    return {
+      text: `Note the unstaking delay of ${name} on ${chain} before you stake: funds locked for days cannot be withdrawn if the farm changes.`,
+      cost: 'no fee to check',
+      time: '5 minutes',
+    };
+  }
+  if (c.includes('prediction')) {
+    return {
+      text: `Only risk the $${capital} you funded on ${name}: a prediction market pays the winners from the losers, so a wrong market loses the stake.`,
+      cost: `the $${capital} stake is at risk`,
+      time: '5 minutes',
+    };
+  }
+  return {
+    text: `Check ${name}'s own docs on ${chain} for the one risk its category carries, and size the position so a failure costs the $${capital} and nothing more.`,
+    cost: 'no fee to check',
+    time: '10 minutes',
+  };
+}
+
+/**
+ * A protocol's farm plan: ten steps, each an action with a cost and a time, and each one read off
+ * the protocol's own record — its name, category, chains, TVL, seven-day growth and age — never
+ * from a hand-written list of names and never the same boilerplate for every row. The wallet and
+ * the safety steps stay, because every farm needs them; the action, the second chain, the timing,
+ * the hold and the caution all change with the record. Every step carries what it costs and how
+ * long it takes, because a plan without either is a slogan.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
@@ -398,9 +529,15 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
   const second = secondActionFor(p, chain);
+  const ageNote =
+    age === null
+      ? 'with no listing date on record, so the hold is the cautious default'
+      : age < 180
+        ? `listed only ${age} days ago, so the protocol is still young`
+        : `running for ${age} days with no token`;
   return [
     {
-      text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
+      text: `Use a fresh wallet that holds only the funds you plan to farm on ${p.name}, and keep its seed phrase offline.`,
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
@@ -414,28 +551,26 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       cost: 'about $2 of gas',
       time: '10 minutes, on a different day',
     },
+    chainStepFor(p, capital, chain),
+    timingStepFor(p),
     {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
-      cost: 'about $2 of gas a week',
-      time: '10 minutes a week',
-    },
-    {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
+      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot: ${p.name} is ${ageNote}.`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
+    riskStepFor(p, capital, chain),
     {
-      text: `Check the protocol's own points or rewards page once a week and confirm the activity is recorded.`,
+      text: `Check ${p.name}'s own points or rewards page once a week and confirm the activity is recorded.`,
       cost: 'no fee to check',
       time: '5 minutes a week',
     },
     {
-      text: `Before you withdraw, verify the contract address on the protocol's own docs, and never pay a fee to claim.`,
+      text: `Before you withdraw from ${p.name}, verify the contract address on its own docs, and never pay a fee to claim.`,
       cost: 'no fee to check, and never pay to claim',
       time: '10 minutes',
     },
     {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
+      text: `Write the wallet, the dates and every ${p.name} transaction in a farm log so you can repeat the position or unwind it.`,
       cost: 'nothing but the log',
       time: '5 minutes',
     },

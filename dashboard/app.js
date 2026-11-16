@@ -118,19 +118,75 @@
     if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
     return s;
   }
+  function secondChainOf(p) { return p.chains && p.chains.length > 1 ? p.chains[1] : null; }
+  function chainStepFor(p, capital, chain) {
+    var second = secondChainOf(p);
+    if (second !== null) {
+      var half = Math.max(10, Math.round(capital / 2));
+      return { text: 'Repeat the same position with $' + half + ' on ' + second + ' through ' + p.name + ", so the wallet shows activity on two of its " + p.chains.length + ' chains instead of one.', cost: '$' + half + ' of capital and about $3 of gas', time: '15 minutes, on a different day' };
+    }
+    return { text: 'Deepen the position on ' + chain + ' with a second feature of ' + p.name + ', such as its other pool or vault, so the wallet shows more than one transaction type.', cost: 'about $2 of gas', time: '10 minutes, on a different day' };
+  }
+  function timingStepFor(p) {
+    var g = p.change_7d;
+    if (g !== null && g !== undefined && g >= 20) {
+      return { text: p.name + ' grew ' + g.toFixed(1) + '% in seven days, so set the position up this week: fast growth is when a farm fills up, and the next snapshot counts it.', cost: 'no extra fee beyond the position', time: 'this week' };
+    }
+    if (g !== null && g !== undefined && g <= -20) {
+      return { text: p.name + ' shrank ' + Math.abs(g).toFixed(1) + '% in seven days, so confirm its app and pools are still live before adding capital, and start with the smallest position.', cost: 'no fee to check', time: '10 minutes before funding' };
+    }
+    if (g === null || g === undefined) {
+      return { text: 'The snapshot records no seven-day growth for ' + p.name + ', so treat the timing as unknown: fund the smallest position first and add more only after the points page shows the activity.', cost: 'no fee to check', time: '10 minutes before funding' };
+    }
+    return { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote on ' + p.name + '.', cost: 'about $2 of gas a week', time: '10 minutes a week' };
+  }
+  function riskStepFor(p, capital, chain) {
+    var c = (p.category || '').toLowerCase();
+    var name = p.name;
+    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0 || c.indexOf('basis trading') >= 0) {
+      return { text: 'Keep the hedge on ' + name + ' small: a leveraged position can be liquidated, so never post more than the $' + capital + ' margin and check the liquidation price weekly.', cost: 'no fee to check', time: '5 minutes a week' };
+    }
+    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) {
+      return { text: 'Watch the health factor of the ' + name + ' loan on ' + chain + ': if the collateral falls, top it up or repay before the position is liquidated.', cost: 'no fee to check', time: '5 minutes a week' };
+    }
+    if (c.indexOf('bridge') >= 0 || c.indexOf('canonical') >= 0) {
+      return { text: 'After bridging through ' + name + ', confirm the funds arrived on ' + chain + ' before using them: a stuck bridge is checked on its own explorer, not by sending more.', cost: 'no fee to check', time: '10 minutes' };
+    }
+    if (c.indexOf('yield') >= 0 || c.indexOf('leveraged farm') >= 0) {
+      return { text: "Check what the " + name + ' vault actually holds on ' + chain + ': a high yield that comes from a token that is falling is a loss dressed as income.', cost: 'no fee to check', time: '10 minutes a week' };
+    }
+    if (c.indexOf('dex') >= 0) {
+      return { text: 'Watch impermanent loss in the ' + name + ' pool on ' + chain + ': if one side of the pair moves far, the position is worth less than holding the two assets.', cost: 'no fee to check', time: '5 minutes a week' };
+    }
+    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) {
+      return { text: 'Note the unstaking delay of ' + name + ' on ' + chain + ' before you stake: funds locked for days cannot be withdrawn if the farm changes.', cost: 'no fee to check', time: '5 minutes' };
+    }
+    if (c.indexOf('prediction') >= 0) {
+      return { text: 'Only risk the $' + capital + ' you funded on ' + name + ': a prediction market pays the winners from the losers, so a wrong market loses the stake.', cost: 'the $' + capital + ' stake is at risk', time: '5 minutes' };
+    }
+    return { text: "Check " + name + "'s own docs on " + chain + ' for the one risk its category carries, and size the position so a failure costs the $' + capital + ' and nothing more.', cost: 'no fee to check', time: '10 minutes' };
+  }
   function farmSteps(p) {
     var chain = chainOf(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
+    var age = p.age_days;
+    var ageNote = age === null || age === undefined
+      ? 'with no listing date on record, so the hold is the cautious default'
+      : age < 180
+        ? 'listed only ' + age + ' days ago, so the protocol is still young'
+        : 'running for ' + age + ' days with no token';
     return [
-      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
+      { text: 'Use a fresh wallet that holds only the funds you plan to farm on ' + p.name + ', and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
       { text: secondActionFor(p, chain), cost: 'about $2 of gas', time: '10 minutes, on a different day' },
-      { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
-      { text: "Check the protocol's own points or rewards page once a week and confirm the activity is recorded.", cost: 'no fee to check', time: '5 minutes a week' },
-      { text: "Before you withdraw, verify the contract address on the protocol's own docs, and never pay a fee to claim.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
+      chainStepFor(p, capital, chain),
+      timingStepFor(p),
+      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot: ' + p.name + ' is ' + ageNote + '.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
+      riskStepFor(p, capital, chain),
+      { text: "Check " + p.name + "'s own points or rewards page once a week and confirm the activity is recorded.", cost: 'no fee to check', time: '5 minutes a week' },
+      { text: 'Before you withdraw from ' + p.name + ", verify the contract address on its own docs, and never pay a fee to claim.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
+      { text: 'Write the wallet, the dates and every ' + p.name + ' transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
     ].map(stepText);
   }
 
@@ -177,15 +233,36 @@
       return hay.indexOf(q) >= 0;
     });
   }
+  // A null sorts last in either direction: an unknown age is not the oldest protocol, and an
+  // unknown seven-day growth is not the worst one. Without this, sorting by age put every
+  // unlisted protocol at the top, ahead of the protocols the snapshot actually dates.
+  // The Live token view runs the same filters as the board: search, category, chain and minimum
+  // TVL all apply, and the watchlist-only box leaves it empty, because a live-token protocol is
+  // by definition not on the pre-token watchlist. Before this, the tab ignored every control and
+  // always showed the same 24 rows whatever the reader had picked.
+  function liveRows() {
+    var q = state.q.trim().toLowerCase();
+    if (state.watchlistOnly) return [];
+    return DATA.live.filter(function (r) {
+      if (r.tvl_usd < state.minTvl) return false;
+      if (state.category !== 'all' && r.category !== state.category) return false;
+      if (state.chain !== 'all' && (r.chains || []).indexOf(state.chain) < 0) return false;
+      if (!q) return true;
+      var hay = [r.name, r.slug, r.category, (r.chains || []).join(' ')].join(' ').toLowerCase();
+      return hay.indexOf(q) >= 0;
+    });
+  }
   function sortedRows(list) {
     var key = state.sort;
     return list.slice().sort(function (a, b) {
-      var av, bv;
-      if (key === 'name') { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
-      else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
-      else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
-      else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
-      else { av = a.implied_value_usd; bv = b.implied_value_usd; }
+      var av, bv, aNull, bNull;
+      if (key === 'name') { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); aNull = false; bNull = false; }
+      else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; aNull = false; bNull = false; }
+      else if (key === 'growth') { aNull = a.change_7d === null || a.change_7d === undefined; bNull = b.change_7d === null || b.change_7d === undefined; av = aNull ? 0 : a.change_7d; bv = bNull ? 0 : b.change_7d; }
+      else if (key === 'age') { aNull = a.age_days === null || a.age_days === undefined; bNull = b.age_days === null || b.age_days === undefined; av = aNull ? 0 : a.age_days; bv = bNull ? 0 : b.age_days; }
+      else { av = a.implied_value_usd; bv = b.implied_value_usd; aNull = false; bNull = false; }
+      if (aNull && !bNull) return 1;
+      if (bNull && !aNull) return -1;
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
       return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
@@ -205,13 +282,16 @@
 
   function lede() {
     var total = DATA.rows.reduce(function (n, r) { return n + r.implied_value_usd; }, 0);
+    // Coverage is counted from the board, not assumed: the tile used to print the watchlist size
+    // over itself, so it always read "covered" even if the board had dropped a watchlist row.
+    var covered = DATA.rows.filter(function (r) { return isWatchlist(r); }).length;
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' rankable pre-token protocols below that floor — every one that could still launch a token, not a top-N cut. Implied value is a model, not a promise.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' rankable pre-token protocols outside the watchlist — every one that could still launch a token, not a top-N cut. Implied value is a model, not a promise.' })
       ),
       el('div', { class: 'facts' },
-        el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
+        el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: covered + ' / ' + DATA.watchlist_size })),
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Total implied value' }), el('b', { text: fmtUsd(total) })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }))
@@ -220,8 +300,10 @@
   }
 
   function controls() {
-    var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
-    var chains = Array.from(new Set(DATA.rows.reduce(function (a, r) { return a.concat(r.chains || []); }, []))).sort();
+    // The filter lists cover both tabs, so a category or chain that only exists in the live set
+    // can still be picked while the Live tab is open.
+    var categories = Array.from(new Set(DATA.rows.concat(DATA.live).map(function (r) { return r.category || 'Other'; }))).sort();
+    var chains = Array.from(new Set(DATA.rows.concat(DATA.live).reduce(function (a, r) { return a.concat(r.chains || []); }, []))).sort();
     var search = el('input', { type: 'search', id: 'q', placeholder: 'Search name, category or chain', value: state.q, 'aria-label': 'Search the board' });
     search.addEventListener('input', function () { state.q = search.value; writeHash(); render(); });
     var cat = el('select', { id: 'category', 'aria-label': 'Filter by category' },
@@ -246,8 +328,8 @@
       'Watchlist only'
     );
     wl.querySelector('input').addEventListener('change', function (e) { state.watchlistOnly = e.target.checked; writeHash(); render(); });
-    var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
-    var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
+    var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; writeHash(); render(); } });
+    var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; writeHash(); render(); } });
     return el('div', { class: 'controls' },
       el('div', { class: 'field grow' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), cat),
@@ -255,7 +337,7 @@
       el('div', { class: 'field' }, el('label', { for: 'mintvl', text: 'Min TVL' }), tvl),
       wl,
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
+      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : liveRows().length + ' live-token protocols' })
     );
   }
 
@@ -277,7 +359,10 @@
         el('button', { class: 'button', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; state.chain = 'all'; state.watchlistOnly = false; state.minTvl = 0; writeHash(); render(); } })
       ));
     }
-    var max = list[0].implied_value_usd || 1;
+    // The bar scale is the strongest implied value among the rows actually shown, not the first
+    // row of the list: when the table is sorted by name, TVL or age the first row is not the
+    // strongest, and scaling by it would push bars past 100% and break the chart.
+    var max = list.reduce(function (m, r) { return Math.max(m, r.implied_value_usd); }, 1);
     var tbody = el('tbody');
     list.forEach(function (r) {
       var growth = r.change_7d === null ? 'n/a' : fmtPct(r.change_7d);
@@ -300,7 +385,7 @@
         el('td', { class: 'num ' + growthClass, text: growth }),
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
         el('td', null, el('div', { class: 'implied' },
-          el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
+          el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.min(100, Math.round((r.implied_value_usd / max) * 100))) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
         el('td', null, el('span', { class: 'status pre', text: 'no token' }))
@@ -327,8 +412,16 @@
   }
 
   function liveTable() {
+    var list = liveRows();
+    if (list.length === 0) {
+      return el('div', { class: 'panel' }, el('div', { class: 'empty' },
+        el('h2', { text: 'No live-token protocol matches that filter' }),
+        el('p', { text: 'Clear the search or pick another category to see the live set again.' }),
+        el('button', { class: 'button', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; state.chain = 'all'; state.watchlistOnly = false; state.minTvl = 0; writeHash(); render(); } })
+      ));
+    }
     var tbody = el('tbody');
-    DATA.live.forEach(function (r) {
+    list.forEach(function (r) {
       tbody.appendChild(el('tr', null,
         el('td', { class: 'num', text: 'live' }),
         el('td', null, el('div', { class: 'name' }, el('b', { text: r.name }), el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') }))),
@@ -368,8 +461,8 @@
     return el('section', { class: 'panel method' },
       el('h2', { text: 'How the radar is built' }),
       el('ol', null,
-        el('li', null, el('b', { text: 'Watchlist first. ' }), 'Every protocol with at least $50M of TVL and no token on record is on the board. That is the floor, never the ceiling.'),
-        el('li', null, el('b', { text: 'Early radar next. ' }), 'Every rankable pre-token protocol below the floor is added too — 138 of them — so the board holds every protocol that could still launch a token, not a top-N cut.'),
+        el('li', null, el('b', { text: 'Watchlist first. ' }), 'Every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record is on the board. That is the floor, never the ceiling.'),
+        el('li', null, el('b', { text: 'Early radar next. ' }), 'Every rankable pre-token protocol outside the watchlist is added too — ' + DATA.early_size + ' of them — so the board holds every protocol that could still launch a token, not a top-N cut.'),
         el('li', null, el('b', { text: 'Wrapped products out. ' }), 'A versioned pool, a bridge, a liquid-staking receipt or an exchange product is not a token waiting to launch, so the watchlist rule keeps them off the board.'),
         el('li', null, el('b', { text: 'Live tokens set aside. ' }), 'Protocols whose token already trades are shown with their market cap, a fact, never mixed into the ranking.'),
         el('li', null, el('b', { text: 'Farm plans from the record. ' }), 'Each plan follows from the protocol’s category, chains, TVL and age, with what each step costs and how long it takes.')
