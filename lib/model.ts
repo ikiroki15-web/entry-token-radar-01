@@ -1,4 +1,4 @@
-// Token Radar, model radar-2: one sealed snapshot in, one ranked board out.
+// Token Radar, model radar-3: one sealed snapshot in, one ranked board out.
 //
 // The board ranks every protocol that records no token and could still launch one: the whole
 // watchlist plus every rankable pre-token protocol in the snapshot, at any TVL. The watchlist is
@@ -12,10 +12,15 @@
 // rule, minus the TVL floor, applied to the whole snapshot. Live-token protocols are kept apart
 // and shown with the market's own values, never mixed into the ranking.
 //
-// Implied value follows only from the snapshot's own figures, never from a name:
+// Implied value follows only from the snapshot's own figures, never from a name, and radar-3
+// calibrates its size term from the snapshot itself instead of a hardcoded coefficient. The
+// anchor is the market's own pricing of live tokens: for each category, the median
+// market-cap-to-TVL ratio of the live protocols in that category (a category needs at least five
+// live protocols with a recorded market cap above zero, or the row falls back to the median over
+// all live protocols). The multiple is clamped to [0.05, 0.65] so one outlier category cannot
+// set the board's scale. Then:
 //
-//   base     = 1.31 x tvl_usd^0.92          (diminishing returns: a protocol ten times the size
-//                                            is worth about eight times as much, not ten)
+//   multiple = category median mcap/TVL, or the overall median when the category is too thin
 //   growth   = clamp(change_7d, -50, 150)   (per cent; unknown growth counts as 0)
 //   growth x = 1 + growth/100 x 0.6         (growth rewarded) or x 0.4 when growth is negative
 //                                            (a shrinking protocol is discounted, not punished)
@@ -25,10 +30,12 @@
 //                                            has proven staying power; a young one is discounted
 //                                            for being unproven, and the curve flattens with age)
 //   breadth  = 1 + 0.02 x min(chains - 1, 4) (a protocol live on more chains reaches more users)
-//   implied  = max(1, round(base x growth x maturity x breadth))
+//   implied  = max(1, round(tvl_usd x multiple x growth x maturity x breadth))
 //
 // No protocol name is ever special-cased: the same function scores every row, and the dashboard
-// recomputes each row from the same figures so the page and board.json visibly agree.
+// recomputes each row from the same figures so the page and board.json visibly agree. The
+// dashboard also prints the comparables table the multiples come from, so a reader can check
+// every multiple against the live protocols that anchor it.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -53,10 +60,11 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** radar-2's constants, as the dashboard states them. */
+/** radar-3's constants, as the dashboard states them. */
 export interface ModelConstants {
-  base_coefficient: number;
-  tvl_exponent: number;
+  multiple_floor: number;
+  multiple_cap: number;
+  min_live_for_category: number;
   growth_weight_up: number;
   growth_weight_down: number;
   growth_floor: number;
@@ -70,8 +78,9 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  base_coefficient: 1.31,
-  tvl_exponent: 0.92,
+  multiple_floor: 0.05,
+  multiple_cap: 0.65,
+  min_live_for_category: 5,
   growth_weight_up: 0.6,
   growth_weight_down: 0.4,
   growth_floor: -50,
@@ -85,7 +94,23 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
+
+/** One row of the comparables table: what the market pays for live tokens in a category. */
+export interface Comparable {
+  category: string;
+  live_n: number;
+  median_mcap_tvl: number;
+  multiple: number;
+  source: 'category' | 'overall';
+}
+
+/** The comparables table and the overall median it falls back to. */
+export interface Comparables {
+  overall_median_mcap_tvl: number;
+  overall_live_n: number;
+  rows: Comparable[];
+}
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -115,6 +140,10 @@ export interface BoardRow {
   implied_value_usd: number;
   model: {
     base_usd: number;
+    multiple: number;
+    multiple_source: 'category' | 'overall';
+    comparable_live_n: number;
+    comparable_median_mcap_tvl: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -137,6 +166,10 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  multiple: number;
+  multiple_source: 'category' | 'overall';
+  comparable_live_n: number;
+  comparable_median_mcap_tvl: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   breadth_multiplier: number;
@@ -153,13 +186,14 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, and the model it runs. */
+/** Everything the dashboard needs: the board, the live set, the comparables, and the model it runs. */
 export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  comparables: Comparables;
   watchlist: string[];
   watchlist_size: number;
   board_size: number;
@@ -193,9 +227,62 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The size term: TVL with diminishing returns, so size still dominates but never linearly. */
-export function baseValue(tvlUsd: number, model: ModelConstants): number {
-  return model.base_coefficient * Math.pow(Math.max(0, tvlUsd), model.tvl_exponent);
+/** The median of a sorted list of numbers; null when the list is empty. */
+function medianOf(sorted: number[]): number | null {
+  if (sorted.length === 0) return null;
+  return sorted[Math.floor(sorted.length / 2)]!;
+}
+
+/** The comparables table, read off the snapshot's own live-token protocols: for every category
+ * with at least `min_live_for_category` live protocols carrying a market cap above zero, the
+ * median market-cap-to-TVL ratio of those protocols; every other category falls back to the
+ * median over all live protocols. A live protocol with no market cap, a zero market cap, no TVL
+ * or a CEX record is not a comparable: a token with no quoted price is not a price. The multiple
+ * is the median clamped to [multiple_floor, multiple_cap], so one rich category cannot set the
+ * board's scale. The table is sorted by multiple, strongest first, so the dashboard can print
+ * it as the market's own ranking of what a token is worth per dollar of TVL. */
+export function comparables(snapshot: Snapshot, model: ModelConstants = MODEL): Comparables {
+  const live = snapshot.protocols.filter(
+    (p) => !isPreToken(p) && p.category !== 'CEX' && p.tvl_usd > 0 && p.mcap_usd !== null && p.mcap_usd > 0,
+  );
+  const overall = medianOf(live.map((p) => p.mcap_usd! / p.tvl_usd).sort((a, b) => a - b)) ?? 0;
+  const clamp = (v: number): number => Math.min(model.multiple_cap, Math.max(model.multiple_floor, v));
+  const byCategory = new Map<string, number[]>();
+  for (const p of live) {
+    const key = p.category ?? 'Other';
+    const list = byCategory.get(key) ?? [];
+    list.push(p.mcap_usd! / p.tvl_usd);
+    byCategory.set(key, list);
+  }
+  const rows: Comparable[] = [...byCategory.entries()]
+    .map(([category, ratios]) => {
+      const median = medianOf(ratios.sort((a, b) => a - b)) ?? overall;
+      const thin = ratios.length < model.min_live_for_category;
+      return {
+        category,
+        live_n: ratios.length,
+        median_mcap_tvl: round4(median),
+        multiple: round4(clamp(thin ? overall : median)),
+        source: (thin ? 'overall' : 'category') as 'category' | 'overall',
+      };
+    })
+    .sort((a, b) => b.multiple - a.multiple || b.live_n - a.live_n || (a.category < b.category ? -1 : 1));
+  return { overall_median_mcap_tvl: round4(overall), overall_live_n: live.length, rows };
+}
+
+/** The multiple one category's rows are scored with: its own median when the category has
+ * enough live protocols to anchor one, else the overall median, clamped to the model's band. */
+export function multipleFor(category: string | null, table: Comparables, model: ModelConstants = MODEL): Comparable {
+  const clamp = (v: number): number => Math.min(model.multiple_cap, Math.max(model.multiple_floor, v));
+  const row = table.rows.find((r) => r.category === (category ?? 'Other'));
+  if (row !== undefined && row.source === 'category') return row;
+  return {
+    category: category ?? 'Other',
+    live_n: table.overall_live_n,
+    median_mcap_tvl: table.overall_median_mcap_tvl,
+    multiple: round4(clamp(table.overall_median_mcap_tvl)),
+    source: 'overall',
+  };
 }
 
 /** The growth term: clamped growth, rewarded when positive, discounted when negative. */
@@ -223,9 +310,10 @@ export function scoreProtocol(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
+  multiple: Comparable,
 ): { implied: number; base: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const base = baseValue(protocol.tvl_usd, model);
+  const base = protocol.tvl_usd * multiple.multiple;
   const { pct: growthPct, mult: growthMult } = growthMultiplier(protocol.change_7d, model);
   const maturityMult = maturityMultiplier(age, model);
   const breadthMult = breadthMultiplier(protocol.chains, model);
@@ -269,7 +357,7 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, table: Comparables = comparables(snapshot, model)): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot,
@@ -289,8 +377,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   }
 
   const scored = [...chosen.values()].map((p) => {
-    const s = scoreProtocol(p, snapshot.as_of, model);
-    return { p, ...s };
+    const multiple = multipleFor(p.category, table, model);
+    const s = scoreProtocol(p, snapshot.as_of, model, multiple);
+    return { p, multiple, ...s };
   });
   // Strongest implied value first; ties break on TVL, then slug, so the order is deterministic.
   scored.sort(
@@ -313,6 +402,10 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     implied_value_usd: s.implied,
     model: {
       base_usd: s.base,
+      multiple: s.multiple.multiple,
+      multiple_source: s.multiple.source,
+      comparable_live_n: s.multiple.live_n,
+      comparable_median_mcap_tvl: s.multiple.median_mcap_tvl,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -608,6 +701,10 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    multiple: row.model.multiple,
+    multiple_source: row.model.multiple_source,
+    comparable_live_n: row.model.comparable_live_n,
+    comparable_median_mcap_tvl: row.model.comparable_median_mcap_tvl,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     breadth_multiplier: row.model.breadth_multiplier,
@@ -616,7 +713,8 @@ export function radarRow(row: BoardRow): RadarRow {
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
+  const table = comparables(snapshot, model);
+  const board = buildBoard(snapshot, model, table);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {
@@ -625,6 +723,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    comparables: table,
     watchlist: snapshot.watchlist,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,

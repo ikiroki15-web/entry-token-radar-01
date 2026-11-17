@@ -32,8 +32,9 @@
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // radar-2, as in lib/model.ts: base = 1.31 x tvl^0.92; growth clamped and asymmetric; maturity
-  // on an exponential curve by age; breadth from the chain count. No name is special-cased.
+  // radar-3, as in lib/model.ts: TVL times the category's own median market-cap-to-TVL among
+  // live tokens (or the overall median when the category is too thin), then growth, maturity
+  // and breadth. No name is special-cased.
   function impliedOf(row, model) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
     var weight = growth >= 0 ? model.growth_weight_up : model.growth_weight_down;
@@ -42,7 +43,7 @@
     var maturity = model.maturity_floor + model.maturity_range * (1 - Math.exp(-Math.max(0, age) / model.maturity_half_life_days));
     var extra = Math.min(Math.max((row.chains || []).length - 1, 0), model.breadth_max_chains - 1);
     var breadth = 1 + extra * model.breadth_per_chain;
-    return Math.max(1, Math.round(model.base_coefficient * Math.pow(Math.max(0, row.tvl_usd), model.tvl_exponent) * growthMult * maturity * breadth));
+    return Math.max(1, Math.round(Math.max(0, row.tvl_usd) * (row.multiple || 0) * growthMult * maturity * breadth));
   }
 
   function el(tag, attrs) {
@@ -446,14 +447,47 @@
     var m = DATA.model;
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
-      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
+      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. The size term is not a hardcoded coefficient: it is the market’s own pricing of live tokens, read off this same snapshot (see the comparables below).' }),
       el('div', { class: 'formula' },
-        'implied = round( 1.31 x tvl_usd^0.92 x growth x maturity x breadth )\n' +
+        'implied = round( tvl_usd x multiple x growth x maturity x breadth )\n' +
+        'multiple = median market-cap / TVL of live tokens in the same category\n' +
+        '           (at least 5 live tokens, else the overall median of ' + DATA.comparables.overall_live_n + ' live tokens: ' + DATA.comparables.overall_median_mcap_tvl + 'x; clamped to ' + m.multiple_floor + '–' + m.multiple_cap + 'x)\n' +
         'growth   = 1 + clamp(change_7d, -50, 150) / 100 x 0.6 (up) or 0.4 (down)\n' +
         'maturity = 0.55 + 0.45 x (1 - e^(-age_days / 400))   age unknown: 365 days\n' +
         'breadth  = 1 + 0.02 x min(chains - 1, 4)'
       ),
-      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token. Size has diminishing returns, growth is rewarded more than decline is punished, and a protocol live on more chains reaches more users.' })
+      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token. A DEX token trades at a different multiple of TVL than a lending token, so each category is priced off its own live tokens; growth is rewarded more than decline is punished, and a protocol live on more chains reaches more users.' })
+    );
+  }
+
+  function comparablesPanel() {
+    var rows = DATA.comparables.rows;
+    var tbody = el('tbody');
+    rows.forEach(function (r) {
+      tbody.appendChild(el('tr', null,
+        el('td', null, el('b', { text: r.category })),
+        el('td', { class: 'num', text: String(r.live_n) }),
+        el('td', { class: 'num', text: r.median_mcap_tvl.toFixed(3) + 'x' }),
+        el('td', { class: 'num', text: r.multiple.toFixed(3) + 'x' }),
+        el('td', null, el('span', { class: 'status ' + (r.source === 'category' ? 'pre' : 'live'), text: r.source === 'category' ? 'category median' : 'overall median' }))
+      ));
+    });
+    return el('section', { class: 'panel model' },
+      el('h2', { text: 'Comparables: what live tokens are worth per dollar of TVL' }),
+      el('p', { class: 'sub', text: 'Each multiple is the median market-cap-to-TVL ratio of the live-token protocols in that category, read off this snapshot — ' + DATA.comparables.overall_live_n + ' live protocols with a recorded market cap above zero, overall median ' + DATA.comparables.overall_median_mcap_tvl + 'x. A category with fewer than 5 live tokens is too thin to anchor its own multiple, so its rows use the overall median instead. A live protocol with no market cap, a zero market cap or no TVL is not a comparable: a token with no quoted price is not a price.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('caption', { class: 'sub', text: 'One row per category that has a live token. The board’s multiples come from this table, strongest first.' }),
+          el('thead', null, el('tr', null,
+            el('th', { scope: 'col', text: 'Category' }),
+            el('th', { scope: 'col', text: 'Live tokens' }),
+            el('th', { scope: 'col', text: 'Median mcap / TVL' }),
+            el('th', { scope: 'col', text: 'Multiple used' }),
+            el('th', { scope: 'col', text: 'Source' })
+          )),
+          tbody
+        )
+      )
     );
   }
 
@@ -496,12 +530,13 @@
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Chains' }), el('b', { class: 'num', text: String((row.chains || []).length) })),
+        el('div', null, el('span', { text: 'Comparable multiple' }), el('b', { class: 'num', text: (row.multiple || 0).toFixed(3) + 'x' })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Breadth multiplier' }), el('b', { class: 'num', text: String(row.breadth_multiplier) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and it says nothing about whether or when a token is issued.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The multiple is ' + (row.multiple_source === 'category' ? 'the median market-cap-to-TVL of ' + row.comparable_live_n + ' live ' + (row.category || 'Other') + ' tokens (' + row.comparable_median_mcap_tvl + 'x)' : 'the overall median of ' + row.comparable_live_n + ' live tokens (' + row.comparable_median_mcap_tvl + 'x), because too few live ' + (row.category || 'Other') + ' tokens exist to anchor a category multiple') + '. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and it says nothing about whether or when a token is issued.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
@@ -529,6 +564,7 @@
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') {
       shell.appendChild(modelPanel());
+      shell.appendChild(comparablesPanel());
       shell.appendChild(methodPanel());
     }
     shell.appendChild(el('footer', { class: 'foot', text: 'Source: ' + DATA.source + '. Snapshot as of ' + DATA.as_of + '. Implied values are this radar’s model, not make.fun’s, and never a prediction that a token will be issued.' }));
