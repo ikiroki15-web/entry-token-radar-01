@@ -36,12 +36,14 @@
   // live tokens (or the overall median when the category is too thin), then growth, maturity
   // and breadth. No name is special-cased.
   function impliedOf(row, model) {
-    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var weight = growth >= 0 ? model.growth_weight_up : model.growth_weight_down;
-    var growthMult = 1 + (growth / 100) * weight;
+    var growthPct = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
+    growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, growthPct));
+    var weight = growthPct >= 0 ? model.growth_weight_up : model.growth_weight_down;
+    var growthMult = 1 + (growthPct / 100) * weight;
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + model.maturity_range * (1 - Math.exp(-Math.max(0, age) / model.maturity_half_life_days));
-    var extra = Math.min(Math.max((row.chains || []).length - 1, 0), model.breadth_max_chains - 1);
+    var chainCount = (row.chains || []).length;
+    var extra = Math.min(Math.max(chainCount - 1, 0), model.breadth_max_chains - 1);
     var breadth = 1 + extra * model.breadth_per_chain;
     return Math.max(1, Math.round(Math.max(0, row.tvl_usd) * (row.multiple || 0) * growthMult * maturity * breadth));
   }
@@ -69,11 +71,24 @@
 
   // The farm plan is the same derivation main.ts writes to board.json: category, chains, TVL and
   // age decide the action, the capital, the hold and every cost and time. No name is special-cased.
-  function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
+  // Each table below lists the category keywords in the order the old checks ran them: the first
+  // rule whose keyword appears in the category wins, and its writer builds the step's text.
+  function pickRule(rules, category) {
+    var c = (category || '').toLowerCase();
+    for (var i = 0; i < rules.length; i++) {
+      var rule = rules[i];
+      for (var j = 0; j < rule.keys.length; j++) {
+        if (c.indexOf(rule.keys[j]) >= 0) return rule;
+      }
+    }
+    return null;
+  }
+  function firstChain(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
   function capitalFor(p) {
-    if (p.tvl_usd >= 5e9) return 250;
-    if (p.tvl_usd >= 1e9) return 150;
-    if (p.tvl_usd >= 1e8) return 100;
+    var tiers = [[5e9, 250], [1e9, 150], [1e8, 100]];
+    for (var i = 0; i < tiers.length; i++) {
+      if (p.tvl_usd >= tiers[i][0]) return tiers[i][1];
+    }
     return 50;
   }
   function holdDaysFor(age) {
@@ -82,42 +97,47 @@
     if (age < 365) return 45;
     return 30;
   }
+  var ACTION_RULES = [
+    { keys: ['lend', 'cdp', 'collateral'], write: function (name, capital, chain) { return 'Supply $' + capital + ' of USDC to ' + name + ' on ' + chain + ' and keep the position open.'; } },
+    { keys: ['dex', 'yield aggregator'], write: function (name, capital, chain) { return 'Provide $' + capital + ' of liquidity to ' + name + "'s main pool on " + chain + ' and keep the position open.'; } },
+    { keys: ['yield', 'leveraged farm'], write: function (name, capital, chain) { return 'Deposit $' + capital + " into " + name + "'s highest-yield vault on " + chain + ' and keep the shares.'; } },
+    { keys: ['bridge', 'canonical'], write: function (name, capital, chain) { return 'Bridge $' + capital + ' of USDC to ' + chain + ' through ' + name + ' and use the bridged funds in its app.'; } },
+    { keys: ['staking', 'restak', 'staking pool'], write: function (name, capital, chain) { return "Stake $" + capital + " of the chain's staking asset through " + name + ' and keep the receipt.'; } },
+    { keys: ['perpetual', 'derivative', 'basis trading'], write: function (name, capital, chain) { return 'Deposit $' + capital + ' of USDC as margin on ' + name + ' and open one small hedge.'; } },
+    { keys: ['prediction'], write: function (name, capital, chain) { return 'Fund $' + capital + ' and place one market position on ' + name + '.'; } },
+    { keys: ['curator', 'allocator', 'risk curator'], write: function (name, capital, chain) { return 'Deposit $' + capital + ' into a ' + name + ' vault on ' + chain + ' and keep the shares.'; } },
+    { keys: ['stable'], write: function (name, capital, chain) { return 'Mint or deposit $' + capital + ' of the stable asset through ' + name + ' on ' + chain + '.'; } },
+    { keys: ['rwa'], write: function (name, capital, chain) { return "Mint $" + capital + " of the protocol's yield asset on " + chain + ' and hold it.'; } },
+    { keys: ['insurance'], write: function (name, capital, chain) { return 'Buy $' + capital + ' of cover from ' + name + ' on ' + chain + ' and keep the policy.'; } },
+    { keys: ['oracle'], write: function (name, capital, chain) { return 'Use $' + capital + ' of ' + name + ' data by opening a position that reads its feed on ' + chain + '.'; } },
+    { keys: ['gaming', 'game'], write: function (name, capital, chain) { return 'Spend $' + capital + ' inside ' + name + "'s game on " + chain + ' and keep the account active.'; } },
+    { keys: ['social'], write: function (name, capital, chain) { return 'Deposit $' + capital + ' into ' + name + ' on ' + chain + ' and use its social features weekly.'; } },
+    { keys: ['ai', 'infrastructure'], write: function (name, capital, chain) { return 'Spend $' + capital + ' on ' + name + "'s service on " + chain + ' and keep the usage going.'; } },
+    { keys: ['payment', 'pay'], write: function (name, capital, chain) { return 'Route $' + capital + ' of payments through ' + name + ' on ' + chain + ' and keep the account active.'; } },
+    { keys: ['chain'], write: function (name, capital, chain) { return 'Use $' + capital + ' on ' + name + "'s chain and keep the address active."; } }
+  ];
   function actionFor(p, capital, chain) {
-    var c = (p.category || '').toLowerCase();
-    var name = p.name;
-    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'Supply $' + capital + ' of USDC to ' + name + ' on ' + chain + ' and keep the position open.';
-    if (c.indexOf('dex') >= 0 || c.indexOf('yield aggregator') >= 0) return 'Provide $' + capital + ' of liquidity to ' + name + "'s main pool on " + chain + ' and keep the position open.';
-    if (c.indexOf('yield') >= 0 || c.indexOf('leveraged farm') >= 0) return 'Deposit $' + capital + " into " + name + "'s highest-yield vault on " + chain + ' and keep the shares.';
-    if (c.indexOf('bridge') >= 0 || c.indexOf('canonical') >= 0) return 'Bridge $' + capital + ' of USDC to ' + chain + ' through ' + name + ' and use the bridged funds in its app.';
-    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0 || c.indexOf('staking pool') >= 0) return "Stake $" + capital + " of the chain's staking asset through " + name + ' and keep the receipt.';
-    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0 || c.indexOf('basis trading') >= 0) return 'Deposit $' + capital + ' of USDC as margin on ' + name + ' and open one small hedge.';
-    if (c.indexOf('prediction') >= 0) return 'Fund $' + capital + ' and place one market position on ' + name + '.';
-    if (c.indexOf('curator') >= 0 || c.indexOf('allocator') >= 0 || c.indexOf('risk curator') >= 0) return 'Deposit $' + capital + ' into a ' + name + ' vault on ' + chain + ' and keep the shares.';
-    if (c.indexOf('stable') >= 0) return 'Mint or deposit $' + capital + ' of the stable asset through ' + name + ' on ' + chain + '.';
-    if (c.indexOf('rwa') >= 0) return "Mint $" + capital + " of the protocol's yield asset on " + chain + ' and hold it.';
-    if (c.indexOf('insurance') >= 0) return 'Buy $' + capital + ' of cover from ' + name + ' on ' + chain + ' and keep the policy.';
-    if (c.indexOf('oracle') >= 0) return 'Use $' + capital + ' of ' + name + ' data by opening a position that reads its feed on ' + chain + '.';
-    if (c.indexOf('gaming') >= 0 || c.indexOf('game') >= 0) return 'Spend $' + capital + ' inside ' + name + "'s game on " + chain + ' and keep the account active.';
-    if (c.indexOf('social') >= 0) return 'Deposit $' + capital + ' into ' + name + ' on ' + chain + ' and use its social features weekly.';
-    if (c.indexOf('ai') >= 0 || c.indexOf('infrastructure') >= 0) return 'Spend $' + capital + ' on ' + name + "'s service on " + chain + ' and keep the usage going.';
-    if (c.indexOf('payment') >= 0 || c.indexOf('pay') >= 0) return 'Route $' + capital + ' of payments through ' + name + ' on ' + chain + ' and keep the account active.';
-    if (c.indexOf('chain') >= 0) return 'Use $' + capital + ' on ' + name + "'s chain and keep the address active.";
-    return 'Deposit $' + capital + ' of USDC into ' + name + ' on ' + chain + ' and keep the position open.';
+    var rule = pickRule(ACTION_RULES, p.category);
+    if (rule) return rule.write(p.name, capital, chain);
+    return 'Deposit $' + capital + ' of USDC into ' + p.name + ' on ' + chain + ' and keep the position open.';
   }
+  var SECOND_ACTION_RULES = [
+    { keys: ['lend', 'cdp'], write: function (name, capital, chain) { return 'Borrow a small amount against the deposit on ' + name + ' and repay it the same week.'; } },
+    { keys: ['dex', 'yield'], write: function (name, capital, chain) { return 'Swap a small amount in ' + name + "'s main pool on " + chain + ' on a different day.'; } },
+    { keys: ['perpetual', 'derivative'], write: function (name, capital, chain) { return 'Close the hedge on ' + name + ' and open a fresh one the following week.'; } },
+    { keys: ['prediction'], write: function (name, capital, chain) { return 'Settle one market on ' + name + ' and open another.'; } },
+    { keys: ['bridge'], write: function (name, capital, chain) { return 'Bridge a small amount back through ' + name + ' so the address shows two-way use.'; } }
+  ];
   function secondActionFor(p, chain) {
-    var c = (p.category || '').toLowerCase();
-    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0) return 'Borrow a small amount against the deposit on ' + p.name + ' and repay it the same week.';
-    if (c.indexOf('dex') >= 0 || c.indexOf('yield') >= 0) return 'Swap a small amount in ' + p.name + "'s main pool on " + chain + ' on a different day.';
-    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0) return 'Close the hedge on ' + p.name + ' and open a fresh one the following week.';
-    if (c.indexOf('prediction') >= 0) return 'Settle one market on ' + p.name + ' and open another.';
-    if (c.indexOf('bridge') >= 0) return 'Bridge a small amount back through ' + p.name + ' so the address shows two-way use.';
+    var rule = pickRule(SECOND_ACTION_RULES, p.category);
+    if (rule) return rule.write(p.name, 0, chain);
     return "Vote in " + p.name + "'s governance or community poll when one is open, or use a second feature of its app.";
   }
   function stepText(step) {
-    var s = step.text + ' Cost: ' + step.cost + '. Time: ' + step.time + '.';
-    if (s.length > 600) s = s.slice(0, 596) + '...';
-    if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
-    return s;
+    var line = step.text + ' Cost: ' + step.cost + '. Time: ' + step.time + '.';
+    if (line.length > 600) line = line.slice(0, 596) + '...';
+    if (line.length < 20) line = line + " Hold the position and check the protocol's own page.";
+    return line;
   }
   function secondChainOf(p) { return p.chains && p.chains.length > 1 ? p.chains[1] : null; }
   function chainStepFor(p, capital, chain) {
@@ -130,45 +150,33 @@
   }
   function timingStepFor(p) {
     var g = p.change_7d;
-    if (g !== null && g !== undefined && g >= 20) {
-      return { text: p.name + ' grew ' + g.toFixed(1) + '% in seven days, so set the position up this week: fast growth is when a farm fills up, and the next snapshot counts it.', cost: 'no extra fee beyond the position', time: 'this week' };
-    }
-    if (g !== null && g !== undefined && g <= -20) {
-      return { text: p.name + ' shrank ' + Math.abs(g).toFixed(1) + '% in seven days, so confirm its app and pools are still live before adding capital, and start with the smallest position.', cost: 'no fee to check', time: '10 minutes before funding' };
-    }
     if (g === null || g === undefined) {
       return { text: 'The snapshot records no seven-day growth for ' + p.name + ', so treat the timing as unknown: fund the smallest position first and add more only after the points page shows the activity.', cost: 'no fee to check', time: '10 minutes before funding' };
     }
+    if (g >= 20) {
+      return { text: p.name + ' grew ' + g.toFixed(1) + '% in seven days, so set the position up this week: fast growth is when a farm fills up, and the next snapshot counts it.', cost: 'no extra fee beyond the position', time: 'this week' };
+    }
+    if (g <= -20) {
+      return { text: p.name + ' shrank ' + Math.abs(g).toFixed(1) + '% in seven days, so confirm its app and pools are still live before adding capital, and start with the smallest position.', cost: 'no fee to check', time: '10 minutes before funding' };
+    }
     return { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote on ' + p.name + '.', cost: 'about $2 of gas a week', time: '10 minutes a week' };
   }
+  var RISK_RULES = [
+    { keys: ['perpetual', 'derivative', 'basis trading'], write: function (name, capital, chain) { return { text: 'Keep the hedge on ' + name + ' small: a leveraged position can be liquidated, so never post more than the $' + capital + ' margin and check the liquidation price weekly.', cost: 'no fee to check', time: '5 minutes a week' }; } },
+    { keys: ['lend', 'cdp', 'collateral'], write: function (name, capital, chain) { return { text: 'Watch the health factor of the ' + name + ' loan on ' + chain + ': if the collateral falls, top it up or repay before the position is liquidated.', cost: 'no fee to check', time: '5 minutes a week' }; } },
+    { keys: ['bridge', 'canonical'], write: function (name, capital, chain) { return { text: 'After bridging through ' + name + ', confirm the funds arrived on ' + chain + ' before using them: a stuck bridge is checked on its own explorer, not by sending more.', cost: 'no fee to check', time: '10 minutes' }; } },
+    { keys: ['yield', 'leveraged farm'], write: function (name, capital, chain) { return { text: "Check what the " + name + ' vault actually holds on ' + chain + ': a high yield that comes from a token that is falling is a loss dressed as income.', cost: 'no fee to check', time: '10 minutes a week' }; } },
+    { keys: ['dex'], write: function (name, capital, chain) { return { text: 'Watch impermanent loss in the ' + name + ' pool on ' + chain + ': if one side of the pair moves far, the position is worth less than holding the two assets.', cost: 'no fee to check', time: '5 minutes a week' }; } },
+    { keys: ['staking', 'restak'], write: function (name, capital, chain) { return { text: 'Note the unstaking delay of ' + name + ' on ' + chain + ' before you stake: funds locked for days cannot be withdrawn if the farm changes.', cost: 'no fee to check', time: '5 minutes' }; } },
+    { keys: ['prediction'], write: function (name, capital, chain) { return { text: 'Only risk the $' + capital + ' you funded on ' + name + ': a prediction market pays the winners from the losers, so a wrong market loses the stake.', cost: 'the $' + capital + ' stake is at risk', time: '5 minutes' }; } }
+  ];
   function riskStepFor(p, capital, chain) {
-    var c = (p.category || '').toLowerCase();
-    var name = p.name;
-    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0 || c.indexOf('basis trading') >= 0) {
-      return { text: 'Keep the hedge on ' + name + ' small: a leveraged position can be liquidated, so never post more than the $' + capital + ' margin and check the liquidation price weekly.', cost: 'no fee to check', time: '5 minutes a week' };
-    }
-    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) {
-      return { text: 'Watch the health factor of the ' + name + ' loan on ' + chain + ': if the collateral falls, top it up or repay before the position is liquidated.', cost: 'no fee to check', time: '5 minutes a week' };
-    }
-    if (c.indexOf('bridge') >= 0 || c.indexOf('canonical') >= 0) {
-      return { text: 'After bridging through ' + name + ', confirm the funds arrived on ' + chain + ' before using them: a stuck bridge is checked on its own explorer, not by sending more.', cost: 'no fee to check', time: '10 minutes' };
-    }
-    if (c.indexOf('yield') >= 0 || c.indexOf('leveraged farm') >= 0) {
-      return { text: "Check what the " + name + ' vault actually holds on ' + chain + ': a high yield that comes from a token that is falling is a loss dressed as income.', cost: 'no fee to check', time: '10 minutes a week' };
-    }
-    if (c.indexOf('dex') >= 0) {
-      return { text: 'Watch impermanent loss in the ' + name + ' pool on ' + chain + ': if one side of the pair moves far, the position is worth less than holding the two assets.', cost: 'no fee to check', time: '5 minutes a week' };
-    }
-    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) {
-      return { text: 'Note the unstaking delay of ' + name + ' on ' + chain + ' before you stake: funds locked for days cannot be withdrawn if the farm changes.', cost: 'no fee to check', time: '5 minutes' };
-    }
-    if (c.indexOf('prediction') >= 0) {
-      return { text: 'Only risk the $' + capital + ' you funded on ' + name + ': a prediction market pays the winners from the losers, so a wrong market loses the stake.', cost: 'the $' + capital + ' stake is at risk', time: '5 minutes' };
-    }
-    return { text: "Check " + name + "'s own docs on " + chain + ' for the one risk its category carries, and size the position so a failure costs the $' + capital + ' and nothing more.', cost: 'no fee to check', time: '10 minutes' };
+    var rule = pickRule(RISK_RULES, p.category);
+    if (rule) return rule.write(p.name, capital, chain);
+    return { text: "Check " + p.name + "'s own docs on " + chain + ' for the one risk its category carries, and size the position so a failure costs the $' + capital + ' and nothing more.', cost: 'no fee to check', time: '10 minutes' };
   }
   function farmSteps(p) {
-    var chain = chainOf(p);
+    var chain = firstChain(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
     var age = p.age_days;
@@ -498,7 +506,6 @@
         el('li', null, el('b', { text: 'Watchlist first. ' }), 'Every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record is on the board. That is the floor, never the ceiling.'),
         el('li', null, el('b', { text: 'Early radar next. ' }), 'Every rankable pre-token protocol outside the watchlist is added too — ' + DATA.early_size + ' of them — so the board holds every protocol that could still launch a token, not a top-N cut.'),
         el('li', null, el('b', { text: 'Wrapped products out. ' }), 'A versioned pool, a bridge, a liquid-staking receipt or an exchange product is not a token waiting to launch, so the watchlist rule keeps them off the board.'),
-        el('li', null, el('b', { text: 'Live tokens set aside. ' }), 'Protocols whose token already trades are shown with their market cap, a fact, never mixed into the ranking.'),
         el('li', null, el('b', { text: 'Farm plans from the record. ' }), 'Each plan follows from the protocol’s category, chains, TVL and age, with what each step costs and how long it takes.')
       )
     );
